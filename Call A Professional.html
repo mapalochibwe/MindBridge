@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Call a Professional | MindBridge</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #eef6f9;
+      text-align: center;
+      padding: 2rem;
+    }
+    h1 {
+      color: #007bff;
+    }
+    .videos {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin: 2rem 0;
+    }
+    video {
+      width: 45%;
+      max-width: 400px;
+      background: black;
+      border-radius: 10px;
+      border: 2px solid #007bff;
+    }
+    button {
+      padding: 12px 24px;
+      margin: 0.5rem;
+      font-size: 1rem;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <h1>Real-Time Video Support</h1>
+  <p>Feeling overwhelmed? Connect with a professional now via secure video.</p>
+
+  <div class="videos">
+    <video id="localVideo" autoplay muted playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+  </div>
+
+  <button onclick="startCall()">📞 Start Call</button>
+  <button onclick="answerCall()">✅ Answer Call</button>
+
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm';
+
+    const supabase = createClient(
+      'https://rgiwxrvpvptsaktrwjdz.supabase.co',
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJnaXd4cnZwdnB0c2FrdHJ3amR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3MjA2MjEsImV4cCI6MjA2NTI5NjYyMX0.-ERmom6oBTMZW9Mx3DtKh8ZdLVl71Wm6HLl-sJXvGLY'
+    );
+
+    let peerConnection;
+    let localStream;
+    const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+
+    async function initLocalStream() {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+    }
+
+    window.startCall = async () => {
+      await initLocalStream();
+      peerConnection = new RTCPeerConnection(config);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+      peerConnection.ontrack = event => {
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      };
+      peerConnection.onicecandidate = async event => {
+        if (event.candidate) {
+          await supabase.from('candidates').insert([{ call_id: '1', candidate: JSON.stringify(event.candidate), role: 'caller' }]);
+        }
+      };
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      await supabase.from('calls').upsert({ id: '1', offer: JSON.stringify(offer) });
+      supabase.channel('room-answer')
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'calls',
+          filter: 'id=eq.1'
+        }, async payload => {
+          if (payload.new.answer) {
+            const answer = JSON.parse(payload.new.answer);
+            await peerConnection.setRemoteDescription(answer);
+          }
+        }).subscribe();
+      listenForICE('callee');
+    };
+
+    window.answerCall = async () => {
+      await initLocalStream();
+      peerConnection = new RTCPeerConnection(config);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+      peerConnection.ontrack = event => {
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+        }
+      };
+      peerConnection.onicecandidate = async event => {
+        if (event.candidate) {
+          await supabase.from('candidates').insert([{ call_id: '1', candidate: JSON.stringify(event.candidate), role: 'callee' }]);
+        }
+      };
+      const { data } = await supabase.from('calls').select('*').eq('id', '1').single();
+      const offer = JSON.parse(data.offer);
+      await peerConnection.setRemoteDescription(offer);
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      await supabase.from('calls').update({ answer: JSON.stringify(answer) }).eq('id', '1');
+      listenForICE('caller');
+    };
+
+    function listenForICE(role) {
+      supabase.channel('room-ice')
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'candidates',
+          filter: `role=eq.${role}`
+        }, async payload => {
+          const candidate = new RTCIceCandidate(JSON.parse(payload.new.candidate));
+          await peerConnection.addIceCandidate(candidate);
+        }).subscribe();
+    }
+  </script>
+</body>
+</html>
